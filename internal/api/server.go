@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -36,6 +37,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/sys/seal-status", s.handleSealStatus)
 	s.mux.HandleFunc("GET /v1/secret", s.handleListSecrets)
 	s.mux.HandleFunc("GET /v1/secret/{key}", s.handleGetSecret)
+
+	s.mux.HandleFunc("PUT /v1/sys/seal", s.handleSeal)
+	s.mux.HandleFunc("PUT /v1/sys/unseal", s.handleUnseal)
+	s.mux.HandleFunc("PUT /v1/secret/{key}", s.handlePutSecret)
 }
 
 // Start starts the HTTP server.
@@ -130,6 +135,66 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleSeal(w http.ResponseWriter, r *http.Request) {
+	s.vault.Seal()
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status": "sealed",
+	})
+}
+
+type unsealRequest struct {
+	Share []byte `json:"share"`
+}
+
+func (s *Server) handleUnseal(w http.ResponseWriter, r *http.Request) {
+	var req unsealRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// TODO: Implement this
+	writeError(w, http.StatusNotImplemented, "single-share unseal not yet implemented")
+}
+
+type putSecretRequest struct {
+	Value string `json:"value"`
+}
+
+func (s *Server) handlePutSecret(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("key")
+	if key == "" {
+		writeError(w, http.StatusBadRequest, "missing key")
+		return
+	}
+
+	var req putSecretRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Value == "" {
+		writeError(w, http.StatusBadRequest, "value is required")
+		return
+	}
+
+	if err := s.vault.Put(key, []byte(req.Value)); err != nil {
+		if errors.Is(err, vault.ErrVaultSealed) {
+			writeError(w, http.StatusServiceUnavailable, "vault is sealed")
+			return
+		}
+		s.logger.Error("failed to put secret", "key", key, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status": "ok",
+		"key":    key,
+	})
+}
+
 // --- Helpers ---
 func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -141,6 +206,11 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{
 		"error": message,
 	})
+}
+
+func readJSON(r *http.Request, v any) error {
+	body := io.LimitReader(r.Body, 1<<20) // 1MB limit
+	return json.NewDecoder(body).Decode(v)
 }
 
 type responseWriter struct {
