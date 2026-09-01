@@ -41,6 +41,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /v1/sys/seal", s.handleSeal)
 	s.mux.HandleFunc("PUT /v1/sys/unseal", s.handleUnseal)
 	s.mux.HandleFunc("PUT /v1/secret/{key}", s.handlePutSecret)
+
+	s.mux.HandleFunc("DELETE /v1/secret/{key}", s.handleDeleteSecret)
 }
 
 // Start starts the HTTP server.
@@ -192,6 +194,32 @@ func (s *Server) handlePutSecret(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status": "ok",
 		"key":    key,
+	})
+}
+
+func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("key")
+	if key == "" {
+		writeError(w, http.StatusBadRequest, "missing key")
+		return
+	}
+
+	if err := s.vault.Delete(key); err != nil {
+		if errors.Is(err, vault.ErrVaultSealed) {
+			writeError(w, http.StatusServiceUnavailable, "vault is sealed")
+			return
+		}
+		if errors.Is(err, vault.ErrSecretNotFound) {
+			writeError(w, http.StatusNotFound, "secret not found")
+			return
+		}
+		s.logger.Error("failed to delete secret", "key", key, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status": "deleted",
 	})
 }
 
