@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -32,6 +33,9 @@ func New(v *vault.Vault, addr string, logger *slog.Logger) *Server {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/sys/health", s.handleHealth)
+	s.mux.HandleFunc("GET /v1/sys/seal-status", s.handleSealStatus)
+	s.mux.HandleFunc("GET /v1/secret", s.handleListSecrets)
+	s.mux.HandleFunc("GET /v1/secret/{key}", s.handleGetSecret)
 }
 
 // Start starts the HTTP server.
@@ -73,11 +77,70 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleSealStatus(w http.ResponseWriter, r *http.Request) {
+	state := s.vault.State()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"sealed": state == vault.StateSealed,
+		"state":  state.String(),
+	})
+}
+
+func (s *Server) handleListSecrets(w http.ResponseWriter, r *http.Request) {
+	keys, err := s.vault.List()
+	if err != nil {
+		if errors.Is(err, vault.ErrVaultSealed) {
+			writeError(w, http.StatusServiceUnavailable, "vault is sealed")
+			return
+		}
+		s.logger.Error("failed to list secrets", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"keys": keys,
+	})
+}
+
+func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("key")
+	if key == "" {
+		writeError(w, http.StatusBadRequest, "missing key")
+		return
+	}
+
+	value, err := s.vault.Get(key)
+	if err != nil {
+		if errors.Is(err, vault.ErrVaultSealed) {
+			writeError(w, http.StatusServiceUnavailable, "vault is sealed")
+			return
+		}
+		if errors.Is(err, vault.ErrSecretNotFound) {
+			writeError(w, http.StatusNotFound, "secret not found")
+			return
+		}
+		s.logger.Error("failed to get secret", "key", key, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"key":   key,
+		"value": string(value),
+	})
+}
+
 // --- Helpers ---
-func writeJSON(w http.ResponseWriter, status int, data interface{}) {
+func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
+}
+
+func writeError(w http.ResponseWriter, status int, message string) {
+	writeJSON(w, status, map[string]string{
+		"error": message,
+	})
 }
 
 type responseWriter struct {
