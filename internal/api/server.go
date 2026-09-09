@@ -57,8 +57,19 @@ func (s *Server) Start() error {
 		IdleTimeout:  30 * time.Second,
 	}
 
-	s.logger.Info("starting API server", "addr", s.addr)
-	return srv.ListenAndServe()
+	// Channel to receive errors from the server
+	errChan := make(chan error, 1)
+
+	go func() {
+		s.logger.Info("starting API server", "addr", s.addr)
+		errChan <- srv.ListenAndServe()
+	}()
+
+	// Wait for interrupt signal or server error
+	select {
+	case err := <-errChan:
+		return err
+	}
 }
 
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
