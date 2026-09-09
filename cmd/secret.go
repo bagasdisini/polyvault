@@ -2,7 +2,14 @@ package cmd
 
 import (
 	"fmt"
+	"net/http"
 	"os"
+	"time"
+)
+
+var (
+	serverAddr = "http://localhost:8200"
+	httpClient = &http.Client{Timeout: 10 * time.Second}
 )
 
 func runPut() error {
