@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bagasdisini/polyvault/pkg/shamir"
+	"github.com/bagasdisini/polyvault/pkg/storage"
 )
 
 var (
@@ -20,6 +21,7 @@ var (
 	ErrSecretNotFound  = errors.New("vault: secret not found")
 	ErrInvalidKey      = errors.New("vault: invalid master key")
 	ErrNotEnoughShares = errors.New("vault: not enough shares provided")
+	ErrNotInitialized  = errors.New("vault: vault not initialized")
 )
 
 // VaultState represents whether the vault is sealed or unsealed.
@@ -54,11 +56,12 @@ type Secret struct {
 type Vault struct {
 	mu sync.RWMutex
 
-	state      VaultState
-	masterKey  []byte // 32 bytes, only present when unsealed
-	masterHash []byte // SHA-256 of master key, for verification
-
-	secrets map[string]*Secret
+	state       VaultState
+	masterKey   []byte // 32 bytes, only present when unsealed
+	masterHash  []byte // SHA-256 of master key, for verification
+	initialized bool
+	storage     storage.Store
+	secrets     map[string]*Secret
 
 	// Shamir configuration
 	threshold int
@@ -70,6 +73,7 @@ type Vault struct {
 type Config struct {
 	Threshold int // minimum shares needed to unseal
 	Total     int // total shares to generate
+	Storage   storage.Store
 }
 
 // New creates a new vault. The vault starts sealed.
@@ -81,12 +85,27 @@ func New(cfg Config) (*Vault, error) {
 		return nil, errors.New("vault: total must be >= threshold")
 	}
 
-	return &Vault{
+	v := &Vault{
 		state:     StateSealed,
 		secrets:   make(map[string]*Secret),
 		threshold: cfg.Threshold,
 		total:     cfg.Total,
-	}, nil
+		storage:   cfg.Storage,
+	}
+
+	// Try to load persisted state if storage is provided
+	if cfg.Storage != nil {
+		if err := v.loadState(); err != nil {
+			if !errors.Is(err, storage.ErrNotFound) {
+				return nil, fmt.Errorf("vault: failed to load state: %w", err)
+			}
+			// No persisted state found - start fresh (vault will be uninitialized)
+		} else {
+			v.initialized = true
+		}
+	}
+
+	return v, nil
 }
 
 // Init generates a new master key and splits it using Shamir's Secret Sharing.
@@ -96,7 +115,7 @@ func (v *Vault) Init() ([]shamir.Share, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	if v.state == StateUnsealed {
+	if v.initialized {
 		return nil, ErrVaultUnsealed
 	}
 
@@ -119,6 +138,14 @@ func (v *Vault) Init() ([]shamir.Share, error) {
 	// Store shares for potential re-sealing
 	v.shares = shares
 
+	// Mark as initialized and persist state
+	v.initialized = true
+	if v.storage != nil {
+		if err := v.saveState(); err != nil {
+			return nil, fmt.Errorf("vault: failed to save state: %w", err)
+		}
+	}
+
 	return shares, nil
 }
 
@@ -130,6 +157,10 @@ func (v *Vault) Unseal(shares []shamir.Share) error {
 
 	if v.state == StateUnsealed {
 		return ErrVaultUnsealed
+	}
+
+	if !v.initialized {
+		return ErrNotInitialized
 	}
 
 	if len(shares) < v.threshold {
@@ -174,6 +205,11 @@ func (v *Vault) State() VaultState {
 	return v.state
 }
 
+// Threshold returns the number of shares needed to unseal the vault.
+func (v *Vault) Threshold() int {
+	return v.threshold
+}
+
 // Put stores a secret. The vault must be unsealed.
 func (v *Vault) Put(key string, value []byte) error {
 	v.mu.Lock()
@@ -202,6 +238,12 @@ func (v *Vault) Put(key string, value []byte) error {
 			CreatedAt: now,
 			UpdatedAt: now,
 			Version:   1,
+		}
+	}
+
+	if v.storage != nil {
+		if err := v.saveState(); err != nil {
+			fmt.Println("warning: failed to persist secret:", err)
 		}
 	}
 
@@ -245,6 +287,13 @@ func (v *Vault) Delete(key string) error {
 	}
 
 	delete(v.secrets, key)
+
+	if v.storage != nil {
+		if err := v.saveState(); err != nil {
+			fmt.Println("warning: failed to persist deletion:", err)
+		}
+	}
+
 	return nil
 }
 
@@ -262,6 +311,13 @@ func (v *Vault) List() ([]string, error) {
 		keys = append(keys, k)
 	}
 	return keys, nil
+}
+
+// IsInitialized returns whether the vault has been initialized.
+func (v *Vault) IsInitialized() bool {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.initialized
 }
 
 // encrypt encrypts data using AES-GCM with the master key.
@@ -324,6 +380,62 @@ func (v *Vault) Export() ([]byte, error) {
 	}
 
 	return json.MarshalIndent(data, "", "  ")
+}
+
+// saveState serializes vault state to persistent storage.
+func (v *Vault) saveState() error {
+	secrets := make(map[string]storage.SecretData, len(v.secrets))
+	for k, s := range v.secrets {
+		secrets[k] = storage.SecretData{
+			Key:       s.Key,
+			Value:     s.Value,
+			CreatedAt: s.CreatedAt.Unix(),
+			UpdatedAt: s.UpdatedAt.Unix(),
+			Version:   s.Version,
+		}
+	}
+
+	vaultData := &storage.VaultData{
+		MasterHash: v.masterHash,
+		Threshold:  v.threshold,
+		Total:      v.total,
+		Secrets:    secrets,
+	}
+
+	if v.storage != nil {
+		return storage.SaveVaultData(v.storage, vaultData)
+	}
+
+	return nil
+}
+
+// loadState loads vault state from persistent storage.
+func (v *Vault) loadState() error {
+	if v.storage == nil {
+		return errors.New("vault: no storage backend configured")
+	}
+
+	vaultData, err := storage.LoadVaultData(v.storage)
+	if err != nil {
+		return err
+	}
+
+	v.masterHash = vaultData.MasterHash
+	v.threshold = vaultData.Threshold
+	v.total = vaultData.Total
+
+	v.secrets = make(map[string]*Secret, len(vaultData.Secrets))
+	for k, sd := range vaultData.Secrets {
+		v.secrets[k] = &Secret{
+			Key:       sd.Key,
+			Value:     sd.Value,
+			CreatedAt: time.Unix(sd.CreatedAt, 0).UTC(),
+			UpdatedAt: time.Unix(sd.UpdatedAt, 0).UTC(),
+			Version:   sd.Version,
+		}
+	}
+
+	return nil
 }
 
 // bytesEqual performs a constant-time comparison.
