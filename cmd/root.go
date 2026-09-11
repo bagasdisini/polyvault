@@ -36,10 +36,10 @@ func Execute() error {
 }
 
 func printUsage() error {
-	fmt.Println(`IronVault - A self-hosted secrets manager
+	fmt.Println(`PolyVault - A self-hosted secrets manager
 
 Usage:
-  ironvault <command> [arguments]
+  polyvault <command> [arguments]
 
 Commands:
   server    Start the vault server
@@ -52,6 +52,6 @@ Commands:
   list      List all secrets
   help      Show this help
 
-Run 'ironvault <command> --help' for more information on a command.`)
+Run 'polyvault <command> --help' for more information on a command.`)
 	return nil
 }
