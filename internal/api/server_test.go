@@ -8,13 +8,26 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/bagasdisini/polyvault/pkg/audit"
+	"github.com/bagasdisini/polyvault/pkg/auth"
+	"github.com/bagasdisini/polyvault/pkg/storage"
+	"github.com/bagasdisini/polyvault/pkg/transit"
 	"github.com/bagasdisini/polyvault/pkg/vault"
 )
 
 func setupTestServer(t *testing.T) (*Server, *vault.Vault) {
 	t.Helper()
 
-	v, err := vault.New(vault.Config{Threshold: 2, Total: 3})
+	// Create a temporary directory for storage
+	tmpDir := t.TempDir()
+
+	store, err := storage.NewFileStore(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to create storage: %v", err)
+	}
+	defer store.Close()
+
+	v, err := vault.New(vault.Config{Threshold: 2, Total: 3, Storage: store})
 	if err != nil {
 		t.Fatalf("vault.New failed: %v", err)
 	}
@@ -29,7 +42,18 @@ func setupTestServer(t *testing.T) (*Server, *vault.Vault) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
-	server := New(v, ":0", logger)
+	authenticator := auth.New()
+	transitEngine := transit.New()
+	a := audit.New([]byte("test-key"), &bytes.Buffer{})
+
+	server := New(ServerConfig{
+		Vault:   v,
+		Auth:    authenticator,
+		Transit: transitEngine,
+		Audit:   a,
+		Logger:  logger,
+		Addr:    ":0",
+	})
 
 	return server, v
 }
@@ -39,7 +63,7 @@ func TestHealthEndpoint(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/v1/sys/health", nil)
 	w := httptest.NewRecorder()
-	server.mux.ServeHTTP(w, req)
+	server.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
@@ -57,13 +81,13 @@ func TestSealStatusEndpoint(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/v1/sys/seal-status", nil)
 	w := httptest.NewRecorder()
-	server.mux.ServeHTTP(w, req)
+	server.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
 
-	var resp map[string]any
+	var resp map[string]interface{}
 	json.NewDecoder(w.Body).Decode(&resp)
 
 	if resp["sealed"] != false {
@@ -79,7 +103,7 @@ func TestPutAndGetSecret(t *testing.T) {
 	req := httptest.NewRequest("PUT", "/v1/secret/my-key", bytes.NewReader(putBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	server.mux.ServeHTTP(w, req)
+	server.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("PUT: expected 200, got %d", w.Code)
@@ -88,13 +112,13 @@ func TestPutAndGetSecret(t *testing.T) {
 	// Get the secret
 	req = httptest.NewRequest("GET", "/v1/secret/my-key", nil)
 	w = httptest.NewRecorder()
-	server.mux.ServeHTTP(w, req)
+	server.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("GET: expected 200, got %d", w.Code)
 	}
 
-	var resp map[string]any
+	var resp map[string]interface{}
 	json.NewDecoder(w.Body).Decode(&resp)
 	if resp["value"] != "my-secret" {
 		t.Errorf("expected 'my-secret', got '%v'", resp["value"])
@@ -106,7 +130,7 @@ func TestGetSecretNotFound(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/v1/secret/nonexistent", nil)
 	w := httptest.NewRecorder()
-	server.mux.ServeHTTP(w, req)
+	server.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", w.Code)
@@ -121,12 +145,12 @@ func TestDeleteSecret(t *testing.T) {
 	req := httptest.NewRequest("PUT", "/v1/secret/delete-me", bytes.NewReader(putBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	server.mux.ServeHTTP(w, req)
+	server.Handler().ServeHTTP(w, req)
 
 	// Delete it
 	req = httptest.NewRequest("DELETE", "/v1/secret/delete-me", nil)
 	w = httptest.NewRecorder()
-	server.mux.ServeHTTP(w, req)
+	server.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("DELETE: expected 200, got %d", w.Code)
@@ -135,7 +159,7 @@ func TestDeleteSecret(t *testing.T) {
 	// Verify it's gone
 	req = httptest.NewRequest("GET", "/v1/secret/delete-me", nil)
 	w = httptest.NewRecorder()
-	server.mux.ServeHTTP(w, req)
+	server.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("GET after DELETE: expected 404, got %d", w.Code)
@@ -151,22 +175,22 @@ func TestListSecrets(t *testing.T) {
 		req := httptest.NewRequest("PUT", "/v1/secret/"+key, bytes.NewReader(putBody))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
-		server.mux.ServeHTTP(w, req)
+		server.Handler().ServeHTTP(w, req)
 	}
 
 	// List them
 	req := httptest.NewRequest("GET", "/v1/secret", nil)
 	w := httptest.NewRecorder()
-	server.mux.ServeHTTP(w, req)
+	server.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("LIST: expected 200, got %d", w.Code)
 	}
 
-	var resp map[string]any
+	var resp map[string]interface{}
 	json.NewDecoder(w.Body).Decode(&resp)
 
-	keys := resp["keys"].([]any)
+	keys := resp["keys"].([]interface{})
 	if len(keys) != 3 {
 		t.Errorf("expected 3 keys, got %d", len(keys))
 	}
@@ -177,7 +201,7 @@ func TestSealEndpoint(t *testing.T) {
 
 	req := httptest.NewRequest("PUT", "/v1/sys/seal", nil)
 	w := httptest.NewRecorder()
-	server.mux.ServeHTTP(w, req)
+	server.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
@@ -196,7 +220,7 @@ func TestPutSecretWhileSealed(t *testing.T) {
 	req := httptest.NewRequest("PUT", "/v1/secret/key", bytes.NewReader(putBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	server.mux.ServeHTTP(w, req)
+	server.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503, got %d", w.Code)
@@ -210,7 +234,7 @@ func TestPutSecretEmptyValue(t *testing.T) {
 	req := httptest.NewRequest("PUT", "/v1/secret/key", bytes.NewReader(putBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	server.mux.ServeHTTP(w, req)
+	server.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", w.Code)

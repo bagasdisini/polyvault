@@ -2,19 +2,32 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
-	"github.com/bagasdisini/polyvault/pkg/vault"
+	"github.com/bagasdisini/polyvault/internal/app"
+	"github.com/bagasdisini/polyvault/internal/config"
 )
 
 func runInit() error {
-	fmt.Println("Initializing new vault...")
+	configPath := "polyvault.json"
 
-	v, err := vault.New(vault.Config{Threshold: 3, Total: 5})
+	cfg, err := config.Load(configPath)
 	if err != nil {
-		return fmt.Errorf("failed to create vault: %w", err)
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("failed to load config: %w", err)
+		}
+		cfg = config.DefaultConfig()
+		if err := cfg.Save(configPath); err != nil {
+			return fmt.Errorf("failed to save config: %w", err)
+		}
 	}
 
-	shares, err := v.Init()
+	application, err := app.New(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create application: %w", err)
+	}
+
+	shares, err := application.InitVault()
 	if err != nil {
 		return fmt.Errorf("failed to initialize vault: %w", err)
 	}
@@ -27,7 +40,7 @@ func runInit() error {
 	}
 
 	fmt.Println("\nIMPORTANT: Store these shares securely!")
-	fmt.Println("You will need 3 of 5 shares to unseal the vault.")
+	fmt.Printf("You will need %d of %d shares to unseal the vault.", cfg.Vault.Threshold, cfg.Vault.Total)
 
 	return nil
 }
