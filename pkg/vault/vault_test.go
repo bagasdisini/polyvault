@@ -181,26 +181,6 @@ func TestVault_SealClearsKey(t *testing.T) {
 	}
 }
 
-func TestVault_Export(t *testing.T) {
-	v := newUnsealedVault(t)
-	v.Put("key1", []byte("value1"))
-	v.Put("key2", []byte("value2"))
-
-	data, err := v.Export()
-	if err != nil {
-		t.Fatalf("Export failed: %v", err)
-	}
-
-	if len(data) == 0 {
-		t.Error("exported data is empty")
-	}
-
-	// Should be valid JSON
-	if data[0] != '{' {
-		t.Error("exported data is not JSON")
-	}
-}
-
 func TestVault_MultipleSecrets(t *testing.T) {
 	v := newUnsealedVault(t)
 

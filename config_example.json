@@ -1,0 +1,21 @@
+{
+  "server": {
+    "addr": ":8200",
+    "read_timeout": "10s",
+    "write_timeout": "10s",
+    "idle_timeout": "30s"
+  },
+  "vault": {
+    "threshold": 3,
+    "total": 5,
+    "data_dir": "./vault-data"
+  },
+  "audit": {
+    "enabled": true,
+    "file": "./vault-data/audit.log"
+  },
+  "auth": {
+    "enabled": true,
+    "token_ttl": "24h"
+  }
+}

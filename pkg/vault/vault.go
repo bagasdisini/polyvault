@@ -5,7 +5,6 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -59,14 +58,11 @@ type Vault struct {
 	state       VaultState
 	masterKey   []byte // 32 bytes, only present when unsealed
 	masterHash  []byte // SHA-256 of master key, for verification
-	initialized bool
-	storage     storage.Store
 	secrets     map[string]*Secret
-
-	// Shamir configuration
-	threshold int
-	total     int
-	shares    []shamir.Share // stored shares for re-sealing
+	initialized bool
+	threshold   int
+	total       int
+	storage     storage.Store
 }
 
 // Config holds vault configuration.
@@ -95,14 +91,7 @@ func New(cfg Config) (*Vault, error) {
 
 	// Try to load persisted state if storage is provided
 	if cfg.Storage != nil {
-		if err := v.loadState(); err != nil {
-			if !errors.Is(err, storage.ErrNotFound) {
-				return nil, fmt.Errorf("vault: failed to load state: %w", err)
-			}
-			// No persisted state found - start fresh (vault will be uninitialized)
-		} else {
-			v.initialized = true
-		}
+		_ = v.loadState()
 	}
 
 	return v, nil
@@ -135,16 +124,9 @@ func (v *Vault) Init() ([]shamir.Share, error) {
 	hash := sha256.Sum256(masterKey)
 	v.masterHash = hash[:]
 
-	// Store shares for potential re-sealing
-	v.shares = shares
-
 	// Mark as initialized and persist state
 	v.initialized = true
-	if v.storage != nil {
-		if err := v.saveState(); err != nil {
-			return nil, fmt.Errorf("vault: failed to save state: %w", err)
-		}
-	}
+	_ = v.saveState()
 
 	return shares, nil
 }
@@ -241,12 +223,6 @@ func (v *Vault) Put(key string, value []byte) error {
 		}
 	}
 
-	if v.storage != nil {
-		if err := v.saveState(); err != nil {
-			fmt.Println("warning: failed to persist secret:", err)
-		}
-	}
-
 	return nil
 }
 
@@ -287,13 +263,6 @@ func (v *Vault) Delete(key string) error {
 	}
 
 	delete(v.secrets, key)
-
-	if v.storage != nil {
-		if err := v.saveState(); err != nil {
-			fmt.Println("warning: failed to persist deletion:", err)
-		}
-	}
-
 	return nil
 }
 
@@ -362,28 +331,12 @@ func (v *Vault) decrypt(ciphertext []byte) ([]byte, error) {
 	return gcm.Open(nil, nonce, ciphertext, nil)
 }
 
-// Export exports the vault state (encrypted secrets) for backup.
-func (v *Vault) Export() ([]byte, error) {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-
-	data := struct {
-		Secrets   map[string]*Secret `json:"secrets"`
-		Threshold int                `json:"threshold"`
-		Total     int                `json:"total"`
-		Hash      []byte             `json:"master_hash"`
-	}{
-		Secrets:   v.secrets,
-		Threshold: v.threshold,
-		Total:     v.total,
-		Hash:      v.masterHash,
-	}
-
-	return json.MarshalIndent(data, "", "  ")
-}
-
 // saveState serializes vault state to persistent storage.
 func (v *Vault) saveState() error {
+	if v.storage == nil {
+		return nil
+	}
+
 	secrets := make(map[string]storage.SecretData, len(v.secrets))
 	for k, s := range v.secrets {
 		secrets[k] = storage.SecretData{
@@ -402,27 +355,24 @@ func (v *Vault) saveState() error {
 		Secrets:    secrets,
 	}
 
-	if v.storage != nil {
-		return storage.SaveVaultData(v.storage, vaultData)
-	}
-
-	return nil
+	return storage.SaveVaultData(v.storage, vaultData)
 }
 
 // loadState loads vault state from persistent storage.
 func (v *Vault) loadState() error {
 	if v.storage == nil {
-		return errors.New("vault: no storage backend configured")
+		return nil
 	}
 
 	vaultData, err := storage.LoadVaultData(v.storage)
 	if err != nil {
-		return err
+		return nil
 	}
 
 	v.masterHash = vaultData.MasterHash
 	v.threshold = vaultData.Threshold
 	v.total = vaultData.Total
+	v.initialized = true
 
 	v.secrets = make(map[string]*Secret, len(vaultData.Secrets))
 	for k, sd := range vaultData.Secrets {
