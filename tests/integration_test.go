@@ -244,15 +244,6 @@ func TestPersistenceAcrossRestart(t *testing.T) {
 		t.Fatal("vault should be initialized after restart")
 	}
 
-	// Need to unseal the restarted vault
-	shares2, err := v2.Init()
-	if err != nil {
-		// Already initialized - re-initialize won't work
-	} else {
-		_ = shares2
-	}
-
-	_ = v2
 	// Note: Full persistence test would need unseal shares to be preserved across restart
 	// For now we verify the metadata persisted (initialized state)
 }
