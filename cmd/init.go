@@ -9,7 +9,7 @@ import (
 )
 
 func runInit() error {
-	configPath := "polyvault.json"
+	configPath := "config.json"
 
 	cfg, err := config.Load(configPath)
 	if err != nil {

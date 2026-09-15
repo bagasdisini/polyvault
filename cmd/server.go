@@ -10,7 +10,7 @@ import (
 )
 
 func runServer() error {
-	configPath := "polyvault.json"
+	configPath := "config.json"
 	addr := ":8200"
 
 	for i := 2; i < len(os.Args); i++ {

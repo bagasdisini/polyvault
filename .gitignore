@@ -23,3 +23,4 @@ Thumbs.db
 # Vault data
 vault-data/
 *.db
+config.json
